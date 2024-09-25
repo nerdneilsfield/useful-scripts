@@ -1,0 +1,74 @@
+#!/bin/bash
+
+# 定义颜色
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# 检查系统类型和可用命令
+if command -v ip &> /dev/null; then
+    CMD="ip"
+elif command -v ifconfig &> /dev/null; then
+    CMD="ifconfig"
+else
+    echo "Error: Neither 'ip' nor 'ifconfig' command found."
+    exit 1
+fi
+
+# 获取网卡列表
+if [ "$CMD" = "ip" ]; then
+    INTERFACES=$(ip -o link show | awk -F': ' '{print $2}' | cut -d@ -f1)
+else
+    INTERFACES=$(ifconfig -a | sed 's/[ \t].*//;/^$/d')
+fi
+
+# 函数：获取网卡信息
+get_interface_info() {
+    local interface=$1
+    local ipv4 ipv6_list mac gateway netmask
+
+    if [ "$CMD" = "ip" ]; then
+        ipv4=$(ip -4 addr show $interface 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1)
+        ipv6_list=$(ip -6 addr show $interface 2>/dev/null | grep -oP '(?<=inet6\s)[0-9a-fA-F:]+')
+        mac=$(ip link show $interface | grep -oP '(?<=link/ether\s)[0-9a-fA-F:]+')
+        gateway=$(ip route | grep default | grep $interface | awk '{print $3}')
+        netmask=$(ip -4 addr show $interface 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}/\d+' | head -n1)
+        if [ -n "$netmask" ]; then
+            prefix=$(echo $netmask | cut -d'/' -f2)
+            netmask=$(printf "%d.%d.%d.%d\n" $(( 0xffffffff << (32 - $prefix) >> 24 & 255 )) $(( 0xffffffff << (32 - $prefix) >> 16 & 255 )) $(( 0xffffffff << (32 - $prefix) >> 8 & 255 )) $(( 0xffffffff << (32 - $prefix) & 255 )))
+        fi
+    else
+        ipv4=$(ifconfig $interface 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1)
+        ipv6_list=$(ifconfig $interface 2>/dev/null | grep -oP '(?<=inet6\s)[0-9a-fA-F:]+')
+        mac=$(ifconfig $interface 2>/dev/null | grep -oP '(?<=ether\s)[0-9a-fA-F:]+')
+        gateway=$(netstat -rn | grep default | grep $interface | awk '{print $2}')
+        netmask=$(ifconfig $interface 2>/dev/null | grep -oP '(?<=netmask\s)\d+(\.\d+){3}' | head -n1)
+    fi
+
+    # 如果 lo 接口没有 MAC 地址，设置为 N/A
+    if [ "$interface" = "lo" ] && [ -z "$mac" ]; then
+        mac="N/A"
+    fi
+
+    echo -e "${GREEN}网卡名:${NC} $interface"
+    echo -e "${BLUE}IPv4:${NC} ${ipv4:-N/A}"
+    echo -e "${BLUE}IPv6:${NC}"
+    if [ -z "$ipv6_list" ]; then
+        echo -e "  ${YELLOW}N/A${NC}"
+    else
+        echo "$ipv6_list" | while read -r ipv6; do
+            echo -e "  ${YELLOW}$ipv6${NC}"
+        done
+    fi
+    echo -e "${YELLOW}Mac 地址:${NC} ${mac:-N/A}"
+    echo -e "${RED}网关:${NC} ${gateway:-N/A}"
+    echo -e "${RED}Netmask:${NC} ${netmask:-N/A}"
+    echo "----------------------------------------"
+}
+
+# 主循环
+for interface in $INTERFACES; do
+    get_interface_info $interface
+done
