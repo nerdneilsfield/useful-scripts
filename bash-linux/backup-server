@@ -1,0 +1,137 @@
+#!/bin/bash
+
+# 定义变量
+BACKUP_DIR="/backup/configs"                    # 备份存储目录
+STAGING_DIR="/backup/staging"                   # 临时存放目录
+SOURCE_PATHS=(                                 # 需要备份的路径数组
+    "/etc/nginx"
+    "/etc/mysql"
+    "/etc/ssh"
+    # 添加更多路径
+)
+LOG_FILE="/var/log/config_backup.log"          # 日志文件
+MAX_BACKUPS=7                                  # 保留的最大备份数量
+DATE=$(date +%Y%m%d_%H%M%S)                   # 时间戳
+BACKUP_NAME="config_backup_${DATE}"            # 基础文件名
+REMOTE_HOST="user@remote_server"               # 远程服务器
+REMOTE_DIR="/backup/remote_configs"            # 远程备份目录
+ENCRYPTION_KEY="your_secure_key_here"          # AES加密密钥
+
+# 检查必要工具
+command -v zstd >/dev/null 2>&1 || { echo "需要安装 zstd"; exit 1; }
+command -v openssl >/dev/null 2>&1 || { echo "需要安装 openssl"; exit 1; }
+command -v rsync >/dev/null 2>&1 || { echo "需要安装 rsync"; exit 1; }
+
+# 日志函数
+log_message() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a $LOG_FILE
+}
+
+# 清理旧的临时目录
+cleanup_staging() {
+    if [ -d "$STAGING_DIR" ]; then
+        rm -rf "$STAGING_DIR"
+    fi
+}
+
+# 添加远程清理函数
+clean_remote_backups() {
+    log_message "正在清理远程服务器上的旧备份..."
+    
+    # 通过SSH连接到远程服务器并执行清理
+    ssh "${REMOTE_HOST}" "
+        cd ${REMOTE_DIR} && \
+        ls -t *.enc 2>/dev/null | tail -n +$((MAX_BACKUPS + 1)) | xargs -r rm && \
+        ls -t *.sha256 2>/dev/null | tail -n +$((MAX_BACKUPS + 1)) | xargs -r rm
+    "
+    
+    if [ $? -eq 0 ]; then
+        log_message "远程服务器清理完成"
+    else
+        log_message "远程服务器清理失败"
+    fi
+}
+
+# 创建必要的目录
+mkdir -p "$BACKUP_DIR"
+cleanup_staging
+mkdir -p "$STAGING_DIR"
+
+log_message "开始备份进程"
+
+# 1. 复制文件到临时目录，保持目录结构
+for path in "${SOURCE_PATHS[@]}"; do
+    if [ -e "$path" ]; then
+        # 创建目标目录结构
+        dest_dir="${STAGING_DIR}${path}"
+        mkdir -p "$(dirname "$dest_dir")"
+        
+        # 复制文件
+        log_message "复制 $path 到临时目录..."
+        cp -a "$path" "$(dirname "$dest_dir")/"
+    else
+        log_message "警告: $path 不存在，跳过"
+    fi
+done
+
+# 2. 使用zstd进行高压缩
+log_message "正在使用zstd压缩文件..."
+cd "$STAGING_DIR"
+# tar --zstd -cf "${BACKUP_DIR}/${BACKUP_NAME}.tar.zst" \
+#     --zstd-compress-level=19 \
+#     ./* 2>/dev/null
+tar cf - -C "$STAGING_DIR" . | zstd -19 -T0 > "${BACKUP_DIR}/${BACKUP_NAME}.tar.zst"
+
+# 3. 生成原始文件的SHA256校验和
+sha256sum "${BACKUP_DIR}/${BACKUP_NAME}.tar.zst" > "${BACKUP_DIR}/${BACKUP_NAME}.sha256"
+
+# 4. AES-256-CBC加密
+log_message "正在加密备份文件..."
+openssl enc -aes-256-cbc \
+    -in "${BACKUP_DIR}/${BACKUP_NAME}.tar.zst" \
+    -out "${BACKUP_DIR}/${BACKUP_NAME}.tar.zst.enc" \
+    -pass pass:"${ENCRYPTION_KEY}" \
+    -pbkdf2
+
+# 5. 生成加密文件的SHA256校验和
+sha256sum "${BACKUP_DIR}/${BACKUP_NAME}.tar.zst.enc" > "${BACKUP_DIR}/${BACKUP_NAME}.enc.sha256"
+
+# 6. 清理未加密的临时文件
+rm "${BACKUP_DIR}/${BACKUP_NAME}.tar.zst"
+cleanup_staging
+
+# 7. 同步到远程服务器
+log_message "正在同步到远程服务器..."
+rsync -avz --progress \
+    "${BACKUP_DIR}/${BACKUP_NAME}.tar.zst.enc" \
+    "${BACKUP_DIR}/${BACKUP_NAME}.enc.sha256" \
+    "${REMOTE_HOST}:${REMOTE_DIR}/"
+clean_remote_backups
+
+# 8. 清理旧备份
+cd "$BACKUP_DIR"
+ls -t *.enc | tail -n +$((MAX_BACKUPS + 1)) | xargs -r rm
+ls -t *.sha256 | tail -n +$((MAX_BACKUPS + 1)) | xargs -r rm
+
+# 创建解密脚本
+cat > "${BACKUP_DIR}/decrypt_backup.sh" << 'EOF'
+#!/bin/bash
+# 使用方法: ./decrypt_backup.sh <加密文件> <解密密钥> <解压目标目录>
+if [ $# -ne 3 ]; then
+    echo "用法: $0 <加密文件> <解密密钥> <解压目标目录>"
+    exit 1
+fi
+
+ENCRYPTED_FILE="$1"
+KEY="$2"
+EXTRACT_DIR="$3"
+
+mkdir -p "$EXTRACT_DIR"
+openssl enc -aes-256-cbc -d -in "$ENCRYPTED_FILE" -pass pass:"$KEY" -pbkdf2 | \
+    zstd -d | tar xf - -C "$EXTRACT_DIR"
+EOF
+chmod +x "${BACKUP_DIR}/decrypt_backup.sh"
+
+log_message "备份完成！"
+echo "备份文件: ${BACKUP_DIR}/${BACKUP_NAME}.tar.zst.enc"
+echo "加密文件大小: $(du -h ${BACKUP_DIR}/${BACKUP_NAME}.tar.zst.enc | cut -f1)"
