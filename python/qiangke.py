@@ -158,8 +158,7 @@ def get_course_url():
         logging.error(f"解析表格时出错: {e}")
     
     logging.error(f"未找到课程 {course_name}")
-    exit()
-
+    return None
 
 # 抢课函数
 def select_course(course_url):
@@ -168,10 +167,13 @@ def select_course(course_url):
         response.encoding = "gb2312"
         if "选择课程成功" in response.text:
             print(f"[{time.strftime('%H:%M:%S')}] 抢课成功！")
+            exit()
         else:
             print(f"[{time.strftime('%H:%M:%S')}] 抢课失败，状态码: {response.text}")
+            return response.text
     else:
         print(f"[{time.strftime('%H:%M:%S')}] 抢课失败，状态码: {response.status_code}")
+        return f"HTTP错误: {response.status_code}"
 
 
 # 精确定时触发函数
@@ -181,8 +183,44 @@ def precise_timer(target_time):
     while True:
         now = datetime.now().time()
         if now >= target_time:
-            course_url = get_course_url()
-            select_course(course_url)
+            # 添加重试机制获取课程 URL
+            max_url_retries = 5
+            for url_attempt in range(1, max_url_retries + 1):
+                try:
+                    course_url = get_course_url()
+                    if course_url != None and course_url != "":
+                        break
+                except Exception as e:
+                    logging.warning(f"第 {url_attempt} 次获取课程 URL 失败: {e}")
+                    if url_attempt < max_url_retries:
+                        retry_wait = 0.5 * url_attempt
+                        logging.info(f"等待 {retry_wait} 秒后重试...")
+                        time.sleep(retry_wait)
+                    else:
+                        logging.error("获取课程 URL 达到最大重试次数，抢课失败")
+                        return
+            
+            # 添加重试机制进行选课
+            max_select_retries = 10
+            for select_attempt in range(1, max_select_retries + 1):
+                try:
+                    logging.info(f"第 {select_attempt} 次尝试选课")
+                    select_result = select_course(course_url)
+                    if "成功" in select_result:
+                        logging.info("抢课成功！")
+                        return
+                    else:
+                        logging.warning(f"选课返回: {select_result}")
+                except Exception as e:
+                    logging.warning(f"第 {select_attempt} 次选课出错: {e}")
+                
+                if select_attempt < max_select_retries:
+                    retry_wait = 0.3 * select_attempt
+                    logging.info(f"等待 {retry_wait} 秒后重试选课...")
+                    time.sleep(retry_wait)
+                else:
+                    logging.error("选课达到最大重试次数，抢课失败")
+            
             break
         time.sleep(0.1)  # 每0.1秒检查一次时间，确保精确触发
         count += 1
