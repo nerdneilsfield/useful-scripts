@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+
+# 默认日志文件路径
+DEFAULT_LOG_FILE="/var/log/docker-compose-manager.log"
+
+# 显示帮助信息
+show_help() {
+    echo "用法: $0 [命令] [选项]"
+    echo
+    echo "命令:"
+    echo "  restart <路径> [容器名]  重启指定路径下的所有容器或指定容器"
+    echo "  update <路径>           更新并启动指定路径下的容器"
+    echo "  help                    显示帮助信息"
+    echo
+    echo "环境变量:"
+    echo "  DOCKER_COMPOSE_LOG      指定日志文件路径（默认: $DEFAULT_LOG_FILE）"
+    echo
+    echo "示例:"
+    echo "  $0 restart /path/to/docker-compose"
+    echo "  $0 restart /path/to/docker-compose container-name"
+    echo "  $0 update /path/to/docker-compose"
+    echo "  $0 help"
+    echo "  DOCKER_COMPOSE_LOG=/custom/path.log $0 restart /path/to/docker-compose"
+    exit 0
+}
+
+# 检查参数数量
+if [ $# -lt 1 ]; then
+    show_help
+fi
+
+# 获取命令
+COMMAND=$1
+shift
+
+# 显示帮助信息
+if [ "$COMMAND" = "help" ]; then
+    show_help
+fi
+
+# 检查路径参数
+if [ $# -lt 1 ]; then
+    echo "错误: 请提供 docker-compose 目录路径"
+    show_help
+fi
+
+COMPOSE_DIR=$1
+shift
+
+# 检查目录是否存在
+if [ ! -d "$COMPOSE_DIR" ]; then
+    echo "错误: 目录 '$COMPOSE_DIR' 不存在"
+    exit 1
+fi
+
+# 设置日志文件（优先使用环境变量，否则使用默认路径）
+LOG_FILE=${DOCKER_COMPOSE_LOG:-$DEFAULT_LOG_FILE}
+DATE=$(date '+%Y-%m-%d %H:%M:%S')
+
+# 确保日志目录存在
+mkdir -p $(dirname $LOG_FILE)
+
+# 记录日志的函数
+log() {
+    echo "[${DATE}] [${COMPOSE_DIR}] $1" | tee -a $LOG_FILE
+}
+
+# 记录日志文件位置
+log "日志文件位置: $LOG_FILE"
+
+# 切换到 docker-compose 目录
+cd $COMPOSE_DIR || {
+    echo "错误: 无法切换到目录 '$COMPOSE_DIR'"
+    exit 1
+}
+
+case "$COMMAND" in
+    "restart")
+        CONTAINER_NAME=$1
+        if [ -n "$CONTAINER_NAME" ]; then
+            log "重启指定容器: $CONTAINER_NAME"
+            docker compose restart "$CONTAINER_NAME"
+        else
+            log "重启所有容器"
+            docker compose restart
+        fi
+        
+        # 检查重启状态
+        sleep 5
+        CONTAINER_STATUS=$(docker compose ps)
+        log "重启后的容器状态："
+        echo "$CONTAINER_STATUS" >> $LOG_FILE
+        ;;
+        
+    "update")
+        log "开始检查更新..."
+        docker compose pull > /tmp/docker-pull.tmp 2>&1
+        UPDATE_NEEDED=$(cat /tmp/docker-pull.tmp | grep -E "Pull complete")
+
+        if [ ! -z "$UPDATE_NEEDED" ]; then
+            log "发现新版本，开始更新..."
+            log "更新内容："
+            cat /tmp/docker-pull.tmp >> $LOG_FILE
+
+            log "停止并删除旧容器..."
+            docker compose down
+
+            log "启动新容器..."
+            docker compose up -d
+
+            # 检查启动状态
+            sleep 10
+            CONTAINER_STATUS=$(docker compose ps)
+            log "更新后的容器状态："
+            echo "$CONTAINER_STATUS" >> $LOG_FILE
+
+            log "清理旧镜像..."
+            docker image prune -f >> $LOG_FILE 2>&1
+        else
+            log "没有发现更新"
+        fi
+        ;;
+        
+    *)
+        echo "错误: 未知命令 '$COMMAND'"
+        show_help
+        ;;
+esac
+
+log "操作完成"
+echo "----------------------------------------" >> $LOG_FILE
