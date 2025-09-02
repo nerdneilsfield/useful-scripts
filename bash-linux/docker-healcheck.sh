@@ -138,7 +138,11 @@ restart_docker_compose() {
     
     # 获取服务状态（可选）
     log_info "当前服务状态:"
-    $DOCKER_COMPOSE_CMD ps
+    if [ -n "$LOG_FILE" ]; then
+        $DOCKER_COMPOSE_CMD ps 2>&1 | tee -a "$LOG_FILE"
+    else
+        $DOCKER_COMPOSE_CMD ps
+    fi
     
     # 重启服务
     log_info "执行重启命令..."
@@ -151,7 +155,11 @@ restart_docker_compose() {
         
         # 重新检查服务状态
         log_info "重启后服务状态:"
-        $DOCKER_COMPOSE_CMD ps
+        if [ -n "$LOG_FILE" ]; then
+            $DOCKER_COMPOSE_CMD ps 2>&1 | tee -a "$LOG_FILE"
+        else
+            $DOCKER_COMPOSE_CMD ps
+        fi
         
         # 执行重启后的健康检查
         log_info "执行重启后的健康检查..."
