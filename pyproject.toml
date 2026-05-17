@@ -1,0 +1,9 @@
+[project]
+name = "useful-scripts"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pypdf>=6.11.0",
+]
