@@ -27,12 +27,13 @@ except ImportError:
 # 工具函数
 # ──────────────────────────────────────────────
 
+
 def sanitize_filename(name: str, max_len: int = 80) -> str:
     """移除文件名非法字符，截断过长标题"""
     name = name.strip()
-    name = re.sub(r'[\\/*?:"<>|\r\n\t]', '_', name)
-    name = re.sub(r'_+', '_', name)           # 连续下划线合并
-    name = name.strip('_. ')
+    name = re.sub(r'[\\/*?:"<>|\r\n\t]', "_", name)
+    name = re.sub(r"_+", "_", name)  # 连续下划线合并
+    name = name.strip("_. ")
     return name[:max_len] or "untitled"
 
 
@@ -48,7 +49,7 @@ def get_outline_items(reader: PdfReader) -> list[tuple[int, str, int]]:
             if isinstance(node, list):
                 walk(node, level + 1)
                 continue
-            title = getattr(node, 'title', None) or "(无标题)"
+            title = getattr(node, "title", None) or "(无标题)"
             try:
                 page_idx = reader.get_destination_page_number(node)
             except Exception:
@@ -71,9 +72,9 @@ def filter_by_level(items, level: int | None) -> list[tuple[int, str, int]]:
     return [(l, t, p) for l, t, p in items if l == level]
 
 
-def build_chapters(items: list[tuple[int, str, int]],
-                   total_pages: int,
-                   min_pages: int) -> list[dict]:
+def build_chapters(
+    items: list[tuple[int, str, int]], total_pages: int, min_pages: int
+) -> list[dict]:
     """
     将 (level, title, start_page) 列表转成
     [{'index': n, 'title': t, 'start': s, 'end': e, 'pages': n}, ...]
@@ -85,19 +86,22 @@ def build_chapters(items: list[tuple[int, str, int]],
         page_count = end - start
         if page_count < min_pages:
             continue
-        chapters.append({
-            "index":  len(chapters) + 1,
-            "title":  title,
-            "start":  start,          # inclusive, 0-based
-            "end":    end,            # exclusive, 0-based
-            "pages":  page_count,
-        })
+        chapters.append(
+            {
+                "index": len(chapters) + 1,
+                "title": title,
+                "start": start,  # inclusive, 0-based
+                "end": end,  # exclusive, 0-based
+                "pages": page_count,
+            }
+        )
     return chapters
 
 
 # ──────────────────────────────────────────────
 # 核心操作
 # ──────────────────────────────────────────────
+
 
 def list_outline(reader: PdfReader, level: int | None):
     """打印书签树"""
@@ -113,13 +117,10 @@ def list_outline(reader: PdfReader, level: int | None):
     for lvl, title, page in items:
         marker = "  " * lvl + ("▸ " if lvl == 0 else "· ")
         flag = "" if (level is None or lvl == level) else "  (跳过)"
-        print(f"{lvl:>4}  {page+1:>6}  {marker}{title}{flag}")
+        print(f"{lvl:>4}  {page + 1:>6}  {marker}{title}{flag}")
 
 
-def split_pdf(reader: PdfReader,
-              chapters: list[dict],
-              output_dir: Path,
-              dry_run: bool):
+def split_pdf(reader: PdfReader, chapters: list[dict], output_dir: Path, dry_run: bool):
     """执行切分，dry_run=True 时只打印不写文件"""
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -131,7 +132,7 @@ def split_pdf(reader: PdfReader,
         out_path = output_dir / filename
         label = (
             f"  [{ch['index']:>{pad}}] "
-            f"页 {ch['start']+1:>4}–{ch['end']:>4}  "
+            f"页 {ch['start'] + 1:>4}–{ch['end']:>4}  "
             f"({ch['pages']:>3}p)  {ch['title']}"
         )
 
@@ -161,13 +162,16 @@ def split_pdf(reader: PdfReader,
     if dry_run:
         print(f"[dry-run] 共 {ok} 个章节（未写入任何文件）")
     else:
-        print(f"完成：{ok} 个章节已保存到 {output_dir}"
-              + (f"，{skipped} 个已跳过" if skipped else ""))
+        print(
+            f"完成：{ok} 个章节已保存到 {output_dir}"
+            + (f"，{skipped} 个已跳过" if skipped else "")
+        )
 
 
 # ──────────────────────────────────────────────
 # CLI
 # ──────────────────────────────────────────────
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -182,13 +186,15 @@ def parse_args():
         help="输入 PDF 路径",
     )
     parser.add_argument(
-        "-o", "--output-dir",
+        "-o",
+        "--output-dir",
         metavar="DIR",
         default=None,
         help="输出目录（默认：与输入文件同目录下的 <stem>_chapters/）",
     )
     parser.add_argument(
-        "-l", "--level",
+        "-l",
+        "--level",
         metavar="N",
         type=int,
         default=0,
@@ -277,15 +283,20 @@ def main():
     # ── 执行 ──
     print(f"输入：{input_path}  ({len(reader.pages)} 页)")
     print(f"输出：{output_dir}")
-    print(f"章节：{len(chapters)} 个（层级={args.level}，min-pages={args.min_pages}）\n")
+    print(
+        f"章节：{len(chapters)} 个（层级={args.level}，min-pages={args.min_pages}）\n"
+    )
 
     # 临时把 overwrite 注入到 split_pdf（简单处理）
     if args.overwrite:
         # monkey-patch：让 split_pdf 直接覆盖
         import builtins
+
         _orig_open = builtins.open
+
         def _open_overwrite(path, mode="r", **kw):
             return _orig_open(path, mode, **kw)
+
         # 直接在 split_pdf 里已经是写模式，overwrite 只需跳过"已存在"判断
         for ch in chapters:
             pad = len(str(len(chapters)))
