@@ -1,0 +1,410 @@
+#!/usr/bin/env bash
+# 固定 C locale，避免多字节字符与 set -u 交互导致变量名解析异常，
+# 同时保证 docker compose 输出为英文，便于后续按固定字符串匹配。
+export LC_ALL=C
+set -euo pipefail
+
+# 默认日志文件路径
+DEFAULT_LOG_FILE="${HOME}/.cache/docker-compose-manager/docker-compose-manager.log"
+
+# 日志 tail 行数默认值
+: "${DOCKER_COMPOSE_LOGS_TAIL:=100}"
+
+# 容器就绪等待默认值（秒）
+: "${DOCKER_COMPOSE_WAIT_TIMEOUT:=30}"
+: "${DOCKER_COMPOSE_WAIT_INTERVAL:=2}"
+
+# 全局选项
+QUIET=0
+DRY_RUN=0
+NO_COLOR=0
+
+# 颜色定义
+RED=''
+GREEN=''
+YELLOW=''
+RESET=''
+
+setup_colors() {
+    if [ "$NO_COLOR" -eq 0 ] && [ -t 1 ]; then
+        RED='\033[0;31m'
+        GREEN='\033[0;32m'
+        YELLOW='\033[1;33m'
+        RESET='\033[0m'
+    fi
+}
+
+# 显示帮助信息
+show_help() {
+    cat <<EOF
+用法: $0 [全局选项] <命令> <路径> [参数...]
+
+全局选项:
+  -q, --quiet      静默模式，只把日志写入文件，不在终端输出
+      --dry-run    只打印将要执行的命令，不真正执行
+      --no-color   禁用颜色输出
+
+命令:
+  restart <路径> [容器名...]      普通重启指定路径下的容器（docker compose restart）
+  hard-restart <路径> [服务名...] 硬重启：先停止/删除容器再重新拉起（docker compose down + up -d）
+  update  <路径> [服务名...]      更新并启动指定路径下的容器（可限定服务）
+  build   <路径> [服务名...]   构建指定路径下的镜像（可限定服务）
+  status  <路径>               查看容器状态
+  logs    <路径> [服务名...]   查看日志（默认 tail ${DOCKER_COMPOSE_LOGS_TAIL} 行）
+  help                         显示帮助信息
+
+环境变量:
+  DOCKER_COMPOSE_LOG          指定日志文件路径（默认: ${DEFAULT_LOG_FILE}）
+  DOCKER_COMPOSE_PRUNE=1      更新后执行 docker image prune -f（默认不执行）
+  DOCKER_COMPOSE_LOGS_TAIL=N  设置 logs 命令默认 tail 行数（默认: 100）
+  DOCKER_COMPOSE_WAIT_TIMEOUT=N    设置等待容器就绪的超时时间，单位秒（默认: 30）
+  DOCKER_COMPOSE_WAIT_INTERVAL=N   设置等待容器就绪的检查间隔，单位秒（默认: 2）
+
+示例:
+  $0 restart /path/to/docker-compose
+  $0 restart /path/to/docker-compose web db
+  $0 update /path/to/docker-compose
+  $0 update /path/to/docker-compose app worker
+  $0 logs /path/to/docker-compose web
+  $0 -q --dry-run update /path/to/docker-compose
+EOF
+    exit 0
+}
+
+# 记录日志的函数
+log() {
+    local date_str
+    date_str=$(date '+%Y-%m-%d %H:%M:%S')
+    local line="[${date_str}] [${COMPOSE_DIR}] $1"
+    echo "$line" >> "$LOG_FILE"
+    if [ "$QUIET" -eq 0 ]; then
+        echo -e "$line"
+    fi
+}
+
+# 输出错误信息（始终输出到 stderr）
+error() {
+    if [ "$QUIET" -eq 0 ]; then
+        echo -e "${RED}错误: $1${RESET}" >&2
+    else
+        echo "错误: $1" >&2
+    fi
+}
+
+# 输出警告信息
+warn() {
+    if [ "$QUIET" -eq 0 ]; then
+        echo -e "${YELLOW}警告: $1${RESET}" >&2
+    else
+        echo "警告: $1" >&2
+    fi
+}
+
+# 输出成功信息
+success() {
+    log "$1"
+}
+
+# 执行命令，支持 dry-run 模式
+run() {
+    if [ "$DRY_RUN" -eq 1 ]; then
+        log "[dry-run] $*"
+        return 0
+    fi
+    "$@"
+}
+
+# 校验容器名/服务名，避免特殊字符导致命令解析异常
+validate_name() {
+    local name=$1
+    if [[ ! "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]]; then
+        error "名称包含非法字符: $name"
+        exit 1
+    fi
+}
+
+# 检查 docker 与 docker compose 是否可用
+check_docker() {
+    if ! command -v docker >/dev/null 2>&1; then
+        error "未找到 docker 命令"
+        exit 1
+    fi
+    if ! docker compose version >/dev/null 2>&1; then
+        error "docker compose 插件不可用"
+        exit 1
+    fi
+}
+
+# 检查 docker-compose 文件是否存在
+find_compose_file() {
+    local file
+    for file in docker-compose.yml docker-compose.yaml compose.yml compose.yaml; do
+        if [ -f "$file" ]; then
+            echo "$file"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# 等待容器进入稳定运行状态
+wait_for_containers() {
+    local timeout=${1:-$DOCKER_COMPOSE_WAIT_TIMEOUT}
+    local interval=${2:-$DOCKER_COMPOSE_WAIT_INTERVAL}
+    local elapsed=0
+    local status
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        log "[dry-run] 跳过容器就绪等待"
+        return 0
+    fi
+
+    log "等待容器就绪（最多 ${timeout} 秒，每 ${interval} 秒检查一次）..."
+    while [ "$elapsed" -le "$timeout" ]; do
+        status=$(docker compose ps 2>/dev/null || true)
+
+        # 先判断是否有异常状态，再判断是否有运行中状态
+        if echo "$status" | grep -qiE 'exited|dead|restarting'; then
+            error "容器处于异常状态"
+            echo "$status" >> "$LOG_FILE"
+            return 1
+        fi
+
+        if echo "$status" | grep -qiE 'running|up\s+'; then
+            return 0
+        fi
+
+        if [ "$elapsed" -ge "$timeout" ]; then
+            break
+        fi
+
+        sleep "$interval"
+        elapsed=$((elapsed + interval))
+    done
+
+    warn "等待容器就绪超时"
+    return 1
+}
+
+# 解析全局选项
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -q|--quiet)
+            QUIET=1
+            shift
+            ;;
+        --dry-run)
+            DRY_RUN=1
+            shift
+            ;;
+        --no-color)
+            NO_COLOR=1
+            shift
+            ;;
+        -h|--help)
+            show_help
+            ;;
+        -*)
+            error "未知选项 '$1'"
+            exit 1
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+setup_colors
+
+# 检查参数数量
+if [ $# -lt 1 ]; then
+    show_help
+fi
+
+# 获取命令
+COMMAND=$1
+shift
+
+# 显示帮助信息
+if [ "$COMMAND" = "help" ]; then
+    show_help
+fi
+
+# 检查路径参数
+if [ $# -lt 1 ]; then
+    error "请提供 docker-compose 目录路径"
+    exit 1
+fi
+
+COMPOSE_DIR=$1
+shift
+
+# 剩余参数作为命令特定参数（容器名/服务名等）
+ARGS=("$@")
+
+# 检查目录是否存在
+if [ ! -d "$COMPOSE_DIR" ]; then
+    error "目录 '$COMPOSE_DIR' 不存在"
+    exit 1
+fi
+
+# 解析为绝对路径，避免符号链接或相对路径带来的歧义
+COMPOSE_DIR=$(cd "$COMPOSE_DIR" && pwd)
+
+# 检查 docker 环境
+check_docker
+
+# 切换到 docker-compose 目录
+cd "$COMPOSE_DIR" || {
+    error "无法切换到目录 '$COMPOSE_DIR'"
+    exit 1
+}
+
+# 检查 compose 文件
+if ! find_compose_file >/dev/null; then
+    error "在 '$COMPOSE_DIR' 中未找到 docker-compose 文件"
+    exit 1
+fi
+
+# 设置日志文件（优先使用环境变量，否则使用默认路径）
+LOG_FILE=${DOCKER_COMPOSE_LOG:-$DEFAULT_LOG_FILE}
+LOG_DIR=$(dirname "$LOG_FILE")
+
+# 确保日志目录存在
+if ! mkdir -p "$LOG_DIR"; then
+    error "无法创建日志目录 '$LOG_DIR'"
+    exit 1
+fi
+
+# 使用不可预测的临时文件，并在脚本退出时自动清理
+PULL_TMP=$(mktemp)
+trap 'rm -f "$PULL_TMP"' EXIT
+
+# 记录日志文件位置（仅在非静默模式输出到终端）
+log "日志文件位置: $LOG_FILE"
+
+case "$COMMAND" in
+    "restart")
+        if [ ${#ARGS[@]} -gt 0 ]; then
+            for name in "${ARGS[@]}"; do
+                validate_name "$name"
+            done
+            log "重启指定容器: ${ARGS[*]}"
+            run docker compose restart "${ARGS[@]}"
+        else
+            log "重启所有容器"
+            run docker compose restart
+        fi
+
+        # 等待并检查重启状态
+        if wait_for_containers; then
+            if [ "$DRY_RUN" -eq 0 ]; then
+                CONTAINER_STATUS=$(docker compose ps)
+                log "重启后的容器状态："
+                echo "$CONTAINER_STATUS" >> "$LOG_FILE"
+            else
+                log "[dry-run] 跳过容器状态检查"
+            fi
+        fi
+        ;;
+
+    "hard-restart")
+        if [ ${#ARGS[@]} -gt 0 ]; then
+            for name in "${ARGS[@]}"; do
+                validate_name "$name"
+            done
+            log "硬重启指定服务: ${ARGS[*]}"
+            run docker compose rm -s -f "${ARGS[@]}"
+            run docker compose up -d "${ARGS[@]}"
+        else
+            log "硬重启所有服务"
+            run docker compose down
+            run docker compose up -d
+        fi
+
+        # 等待并检查启动状态
+        if wait_for_containers; then
+            if [ "$DRY_RUN" -eq 0 ]; then
+                CONTAINER_STATUS=$(docker compose ps)
+                log "硬重启后的容器状态："
+                echo "$CONTAINER_STATUS" >> "$LOG_FILE"
+            else
+                log "[dry-run] 跳过容器状态检查"
+            fi
+        fi
+        ;;
+
+    "update")
+        log "开始检查更新..."
+        if [ "$DRY_RUN" -eq 0 ]; then
+            if ! docker compose pull > "$PULL_TMP" 2>&1; then
+                error "docker compose pull 失败"
+                cat "$PULL_TMP" >> "$LOG_FILE"
+                exit 1
+            fi
+        else
+            log "[dry-run] docker compose pull"
+        fi
+
+        # 记录 pull 输出，便于排查
+        if [ -s "$PULL_TMP" ]; then
+            log "pull 输出："
+            cat "$PULL_TMP" >> "$LOG_FILE"
+        fi
+
+        if [ ${#ARGS[@]} -gt 0 ]; then
+            log "应用最新配置与镜像（服务: ${ARGS[*]}）..."
+        else
+            log "应用最新配置与镜像..."
+        fi
+        run docker compose up -d "${ARGS[@]}"
+
+        # 等待并检查启动状态
+        if wait_for_containers; then
+            if [ "$DRY_RUN" -eq 0 ]; then
+                CONTAINER_STATUS=$(docker compose ps)
+                log "更新后的容器状态："
+                echo "$CONTAINER_STATUS" >> "$LOG_FILE"
+            else
+                log "[dry-run] 跳过容器状态检查"
+            fi
+        fi
+
+        # 默认不执行全局镜像清理，避免误删其他项目的构建缓存或镜像
+        if [ "${DOCKER_COMPOSE_PRUNE:-0}" = "1" ]; then
+            log "清理旧镜像..."
+            run docker image prune -f
+        fi
+        ;;
+
+    "build")
+        if [ ${#ARGS[@]} -gt 0 ]; then
+            log "构建镜像（服务: ${ARGS[*]}）..."
+        else
+            log "构建镜像..."
+        fi
+        run docker compose build "${ARGS[@]}"
+        ;;
+
+    "status")
+        log "容器状态："
+        run docker compose ps
+        ;;
+
+    "logs")
+        if [ ${#ARGS[@]} -gt 0 ]; then
+            log "查看日志（服务: ${ARGS[*]}，tail ${DOCKER_COMPOSE_LOGS_TAIL}）..."
+        else
+            log "查看日志（tail ${DOCKER_COMPOSE_LOGS_TAIL}）..."
+        fi
+        run docker compose logs --tail "$DOCKER_COMPOSE_LOGS_TAIL" "${ARGS[@]}"
+        ;;
+
+    *)
+        error "未知命令 '$COMMAND'"
+        exit 1
+        ;;
+esac
+
+success "操作完成"
+echo "----------------------------------------" >> "$LOG_FILE"
