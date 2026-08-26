@@ -11,6 +11,27 @@ from urllib.request import Request, urlopen
 
 LOG = logging.getLogger(__name__)
 
+# Configuration method 1 (default): environment variables.
+CONFIG = {
+    "base_url": os.getenv("NEWAPI_URL", ""),
+    "key": os.getenv("NEWAPI_MANAGEMENT_KEY", ""),
+    "users": os.getenv("NEWAPI_USERS", ""),
+    "groups": os.getenv("NEWAPI_GROUPS", ""),
+    "quota": os.getenv("NEWAPI_QUOTA", ""),
+    "mode": os.getenv("NEWAPI_QUOTA_MODE", ""),
+}
+
+# Configuration method 2: write values here. To use it, comment out the
+# CONFIG block above and uncomment this block.
+# CONFIG = {
+#     "base_url": "https://newapi.example.com",
+#     "key": "your-management-key",
+#     "users": "alice,bob",
+#     "groups": "vip",
+#     "quota": "1000000",
+#     "mode": "set",  # set, top_up, or add
+# }
+
 
 def new_quota(current: int, target: int, mode: str) -> int:
     if mode == "set":
@@ -22,8 +43,8 @@ def new_quota(current: int, target: int, mode: str) -> int:
     raise ValueError("NEWAPI_QUOTA_MODE must be set, top_up, or add")
 
 
-def csv_env(name: str) -> set[str]:
-    return {item.strip() for item in os.getenv(name, "").split(",") if item.strip()}
+def csv_items(value: str) -> set[str]:
+    return {item.strip() for item in value.split(",") if item.strip()}
 
 
 class NewAPI:
@@ -73,12 +94,12 @@ class NewAPI:
 
 
 def main() -> int:
-    base_url = os.getenv("NEWAPI_URL", "").strip()
-    key = os.getenv("NEWAPI_MANAGEMENT_KEY", "").strip()
-    usernames = csv_env("NEWAPI_USERS")
-    groups = csv_env("NEWAPI_GROUPS")
-    mode = os.getenv("NEWAPI_QUOTA_MODE", "").strip()
-    quota_text = os.getenv("NEWAPI_QUOTA", "").strip()
+    base_url = CONFIG["base_url"].strip()
+    key = CONFIG["key"].strip()
+    usernames = csv_items(CONFIG["users"])
+    groups = csv_items(CONFIG["groups"])
+    mode = CONFIG["mode"].strip()
+    quota_text = CONFIG["quota"].strip()
 
     if not base_url or not key or not quota_text or not (usernames or groups):
         LOG.error("missing required NEWAPI_* configuration")
