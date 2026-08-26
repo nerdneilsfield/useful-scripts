@@ -18,3 +18,5 @@ python3 newapi_quota_reset.py
 | `NEWAPI_GROUPS` | Comma-separated groups; optional if users set |
 | `NEWAPI_QUOTA` | Non-negative quota in NewAPI internal units |
 | `NEWAPI_QUOTA_MODE` | `set` sets quota, `top_up` raises it only when below target, `add` adds target quota |
+| `NEWAPI_NOTIFY` | `true` by default; writes the global NewAPI Notice after a successful reset (requires Root key) |
+| `NEWAPI_NOTICE` | Notice text; defaults to `本月额度已重置。` and replaces the existing global Notice |
