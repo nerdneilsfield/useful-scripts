@@ -19,6 +19,8 @@ CONFIG = {
     "groups": os.getenv("NEWAPI_GROUPS", ""),
     "quota": os.getenv("NEWAPI_QUOTA", ""),
     "mode": os.getenv("NEWAPI_QUOTA_MODE", ""),
+    "notify": os.getenv("NEWAPI_NOTIFY", "true"),
+    "notice": os.getenv("NEWAPI_NOTICE", "本月额度已重置。"),
 }
 
 # Configuration method 2: write values here. To use it, comment out the
@@ -30,6 +32,8 @@ CONFIG = {
 #     "groups": "vip",
 #     "quota": "1000000",
 #     "mode": "set",  # set, top_up, or add
+#     "notify": "true",  # false disables the NewAPI Notice update
+#     "notice": "本月额度已重置。",
 # }
 
 
@@ -92,6 +96,9 @@ class NewAPI:
     def update_user(self, user: dict) -> None:
         self.request("PUT", "/api/user/", user)
 
+    def update_notice(self, notice: str) -> None:
+        self.request("PUT", "/api/option/", {"key": "Notice", "value": notice})
+
 
 def main() -> int:
     base_url = CONFIG["base_url"].strip()
@@ -100,6 +107,8 @@ def main() -> int:
     groups = csv_items(CONFIG["groups"])
     mode = CONFIG["mode"].strip()
     quota_text = CONFIG["quota"].strip()
+    notify_text = CONFIG["notify"].strip().lower()
+    notice = CONFIG["notice"].strip()
 
     if not base_url or not key or not quota_text or not (usernames or groups):
         LOG.error("missing required NEWAPI_* configuration")
@@ -111,6 +120,9 @@ def main() -> int:
         new_quota(0, quota, mode)
     except ValueError as error:
         LOG.error(error or "NEWAPI_QUOTA must be a non-negative integer")
+        return 2
+    if notify_text not in {"true", "false"}:
+        LOG.error("NEWAPI_NOTIFY must be true or false")
         return 2
 
     api = NewAPI(base_url, key)
@@ -150,7 +162,15 @@ def main() -> int:
         except (KeyError, TypeError, ValueError, RuntimeError) as error:
             failed = True
             LOG.error("%s: %s", username, error)
-    return 1 if failed else 0
+    if failed or notify_text == "false":
+        return 1 if failed else 0
+    try:
+        api.update_notice(notice)
+        LOG.info("NewAPI Notice updated")
+    except RuntimeError as error:
+        LOG.error("NewAPI Notice: %s", error)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
