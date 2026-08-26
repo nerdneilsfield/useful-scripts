@@ -3,7 +3,7 @@ Some useful scripts for Windows, Linux, BSD and MacOS
 
 ## NewAPI quota reset
 
-`newapi_quota_reset.py` runs once; use cron or another scheduler to invoke it monthly. It reads environment variables only, so load your `.env` first:
+`newapi_quota_reset.py` runs once; use cron or another scheduler to invoke it monthly. It reads environment variables by default, or you can switch to the direct configuration block at the top of the script.
 
 ```sh
 set -a; . ./.env; set +a
